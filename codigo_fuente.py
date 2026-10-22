@@ -368,20 +368,109 @@ class ProcesadorApp(ctk.CTk):
                         c_p += 3
 
                 # --- 4. CREAR HOJA NOM ---
+                # --- 4. CREAR HOJA NOM (100% DINÁMICA CON FÓRMULAS DE EXCEL) ---
                 ws = workbook.create_sheet(title='NOM')
-                # TABLA 1: Datos horarios validados
+                
+                # Mapeo de nombres posibles en el archivo crudo hacia los 4 parámetros de la NOM
+                variantes_param = {
+                    'PM10': ['PM10'],
+                    'PM25': ['PM2_5', 'PM2.5', 'PM25'],
+                    'O3': ['O3'],
+                    'SO2': ['SO2']
+                }
+                letras_nom_ver = {}
+                for nom_key, lista_posibles in variantes_param.items():
+                    for p_posible in lista_posibles:
+                        if p_posible in letras_valorvalidado:
+                            letras_nom_ver[nom_key] = letras_valorvalidado[p_posible]
+                            break
+
+                try:
+                    anio = int(dt.dt.year.mode()[0])
+                except Exception:
+                    anio = 2025
+
+                num_filas_horarias = len(df_ver)
+                max_row_h = num_filas_horarias + 1
+
+                # TABLA 1: Datos horarios validados (Vinculados a 'Verificación')
                 encabezados_af = ['Fecha', 'Hora', 'PM10', 'PM25', 'O3', 'SO2']
                 for col_idx, texto in enumerate(encabezados_af, start=1):
                     ws.cell(row=1, column=col_idx, value=texto)
 
-                for r_idx, fila in df_base_nom.iterrows():
+                for r_idx in range(num_filas_horarias):
                     fila_excel = r_idx + 2
-                    ws.cell(row=fila_excel, column=1, value=fila['Fecha'])
-                    ws.cell(row=fila_excel, column=2, value=int(fila['Hora']) if not pd.isna(fila['Hora']) else 0)
+                    ws.cell(row=fila_excel, column=1, value=df_ver['Date'].iloc[r_idx])
+                    hora_val = df_ver['Hora'].iloc[r_idx]
+                    ws.cell(row=fila_excel, column=2, value=int(hora_val) if not pd.isna(hora_val) else 0)
+                    
                     for c_i, nombre_col in enumerate(['PM10', 'PM25', 'O3', 'SO2'], start=3):
-                        val = fila[nombre_col]
-                        if not pd.isna(val):
-                            ws.cell(row=fila_excel, column=c_i, value=float(val))
+                        if nombre_col in letras_nom_ver:
+                            letra_ver = letras_nom_ver[nombre_col]
+                            # Si en Verificación está vacío (por "IO" o falta de dato), deja "", si no, pasa el número
+                            ws.cell(row=fila_excel, column=c_i, value=f'=IF(\'Verificación\'!{letra_ver}{fila_excel}="","",\'Verificación\'!{letra_ver}{fila_excel})')
+
+                # TABLA 3: Promedio de 24 hr filtrado (Calculado dinámicamente desde Tabla 1)
+                ws['M1'] = "Promedio de 24 hr"
+                ws['M1'].font = negrita
+                # Se incluye SO2_24h en la columna S (19) para que el cálculo de SO2 24h también sea dinámico
+                for offset, texto in enumerate(['Fecha', 'Mes', 'Trimestre', 'PM10', 'PM25', 'SO2_24h']):
+                    ws.cell(row=1, column=14 + offset, value=texto)
+
+                fechas_unicas = df_ver['Date'].dropna().unique()
+                num_dias = len(fechas_unicas)
+                max_row_d = num_dias + 1
+
+                for r_idx, fecha_str in enumerate(fechas_unicas):
+                    fila_d = r_idx + 2
+                    try:
+                        mes = int(pd.to_datetime(fecha_str, format='%d/%m/%Y').month)
+                    except Exception:
+                        mes = 1
+                    trim = 1 if mes <= 3 else (2 if mes <= 6 else (3 if mes <= 9 else 4))
+
+                    ws.cell(row=fila_d, column=14, value=fecha_str) # Col N: Fecha
+                    ws.cell(row=fila_d, column=15, value=mes)       # Col O: Mes
+                    ws.cell(row=fila_d, column=16, value=trim)      # Col P: Trimestre
+
+                    # Col Q (17): Promedio 24h PM10 (Col C) si hay >= 18 datos válidos en ese día
+                    ws.cell(row=fila_d, column=17, value=f'=IF(COUNTIFS($A$2:$A${max_row_h}, N{fila_d}, $C$2:$C${max_row_h}, ">=0")>=18, ROUND(AVERAGEIFS($C$2:$C${max_row_h}, $A$2:$A${max_row_h}, N{fila_d}, $C$2:$C${max_row_h}, ">=0"), 0), "")')
+                    # Col R (18): Promedio 24h PM25 (Col D) si hay >= 18 datos válidos en ese día
+                    ws.cell(row=fila_d, column=18, value=f'=IF(COUNTIFS($A$2:$A${max_row_h}, N{fila_d}, $D$2:$D${max_row_h}, ">=0")>=18, ROUND(AVERAGEIFS($D$2:$D${max_row_h}, $A$2:$A${max_row_h}, N{fila_d}, $D$2:$D${max_row_h}, ">=0"), 0), "")')
+                    # Col S (19): Promedio 24h SO2 (Col F) si hay >= 18 datos válidos en ese día
+                    ws.cell(row=fila_d, column=19, value=f'=IF(COUNTIFS($A$2:$A${max_row_h}, N{fila_d}, $F$2:$F${max_row_h}, ">=0")>=18, ROUND(AVERAGEIFS($F$2:$F${max_row_h}, $A$2:$A${max_row_h}, N{fila_d}, $F$2:$F${max_row_h}, ">=0"), 0), "")')
+
+                # TABLA 4: Promedios trimestrales y anual
+                ws['T1'], ws['T2'], ws['V2'] = "Promedios trimestrales", "Conteo esperado", "trimestre"
+                ws['T1'].font = negrita
+                ws['W1'], ws['W2'], ws['X2'], ws['Y2'] = "PM10", "promedio", "conteo", "Promedio con 75%"
+                ws['Z1'], ws['Z2'], ws['AA2'], ws['AB2'] = "PM2.5", "promedio", "conteo", "Promedio con 75%"
+
+                dias_esperados = {1: 90, 2: 91, 3: 92, 4: 92}
+                nombres_trim = {1: 'Ene-Mar', 2: 'Abr-Jun', 3: 'Jul-Sep', 4: 'Oct-Dic'}
+
+                for idx, t in enumerate([1, 2, 3, 4]):
+                    r = idx + 3
+                    ws.cell(row=r, column=20, value=dias_esperados[t]) # Col T: Conteo esperado
+                    ws.cell(row=r, column=21, value=t)                 # Col U: Num trimestre
+                    ws.cell(row=r, column=22, value=nombres_trim[t])   # Col V: Nombre trimestre
+
+                    # PM10 Trimestral (Col W: promedio, Col X: conteo, Col Y: Promedio con 75%)
+                    ws.cell(row=r, column=23, value=f'=IF(X{r}>0, ROUND(AVERAGEIFS($Q$2:$Q${max_row_d}, $P$2:$P${max_row_d}, U{r}, $Q$2:$Q${max_row_d}, ">=0"), 1), "")')
+                    ws.cell(row=r, column=24, value=f'=COUNTIFS($P$2:$P${max_row_d}, U{r}, $Q$2:$Q${max_row_d}, ">0")')
+                    ws.cell(row=r, column=25, value=f'=IF(X{r}>=0.75*T{r}, W{r}, "")')
+
+                    # PM2.5 Trimestral (Col Z: promedio, Col AA: conteo, Col AB: Promedio con 75%)
+                    ws.cell(row=r, column=26, value=f'=IF(AA{r}>0, ROUND(AVERAGEIFS($R$2:$R${max_row_d}, $P$2:$P${max_row_d}, U{r}, $R$2:$R${max_row_d}, ">=0"), 1), "")')
+                    ws.cell(row=r, column=27, value=f'=COUNTIFS($P$2:$P${max_row_d}, U{r}, $R$2:$R${max_row_d}, ">0")')
+                    ws.cell(row=r, column=28, value=f'=IF(AA{r}>=0.75*T{r}, Z{r}, "")')
+
+                ws['V8'] = "Promedio anual"
+                ws['V8'].font = negrita
+                ws['Y8'] = '=IF(COUNT(Y3:Y6)>=3, ROUND(AVERAGE(Y3:Y6), 1), "")'
+                ws['Y8'].font = negrita
+                ws['AB8'] = '=IF(COUNT(AB3:AB6)>=3, ROUND(AVERAGE(AB3:AB6), 1), "")'
+                ws['AB8'].font = negrita
 
                 # TABLA 2: Evaluación PM10 y PM2.5
                 ws['H1'], ws['H2'], ws['H3'], ws['H6'] = "Evaluación PM10 y PM2.5", "NOM-025-SSA1-2014", "PM10", "PM2.5"
@@ -391,82 +480,72 @@ class ProcesadorApp(ctk.CTk):
 
                 ws['J3'], ws['K3'] = f"Año {anio} (promedio)", "Evaluación"
                 ws['J3'].font, ws['K3'].font = negrita, negrita
-                ws['J4'], ws['K4'], ws['J5'], ws['K5'] = max_24h_pm10, eval_24h_pm10, anual_pm10, eval_anual_pm10
-                ws['J7'], ws['K7'], ws['J8'], ws['K8'] = max_24h_pm25, eval_24h_pm25, anual_pm25, eval_anual_pm25
-                ws['H10'], ws['H11'] = "PM10", resumen_pm10
-                ws['H13'], ws['H14'] = "PM2.5", resumen_pm25
+                
+                # Fórmulas de evaluación PM10
+                ws['J4'] = f'=MAX(Q2:Q{max_row_d})'
+                ws['K4'] = '=IF(J4>I4, "Incumple", "Cumple")'
+                ws['J5'] = '=Y8'
+                ws['K5'] = '=IF(J5="", "Cumple", IF(J5>I5, "Incumple", "Cumple"))'
+                
+                # Fórmulas de evaluación PM2.5
+                ws['J7'] = f'=MAX(R2:R{max_row_d})'
+                ws['K7'] = '=IF(J7>I7, "Incumple", "Cumple")'
+                ws['J8'] = '=AB8'
+                ws['K8'] = '=IF(J8="", "Cumple", IF(J8>I8, "Incumple", "Cumple"))'
+
+                ws['H10'], ws['H11'] = "PM10", f'=IF(OR(K4="Incumple", K5="Incumple"), "Incumple en {anio}", "Cumple en {anio}")'
+                ws['H13'], ws['H14'] = "PM2.5", f'=IF(OR(K7="Incumple", K8="Incumple"), "Incumple en {anio}", "Cumple en {anio}")'
                 ws['H10'].font, ws['H13'].font = negrita, negrita
 
-                # TABLA 3: Promedio de 24 hr filtrado
-                ws['M1'] = "Promedio de 24 hr"
-                ws['M1'].font = negrita
-                for offset, texto in enumerate(['Fecha', 'Mes', 'Trimestre', 'PM10', 'PM25']):
-                    ws.cell(row=1, column=14 + offset, value=texto)
-
-                for r_idx, fila in df_diario.iterrows():
-                    fila_excel = r_idx + 2
-                    ws.cell(row=fila_excel, column=14, value=fila['Fecha'])
-                    ws.cell(row=fila_excel, column=15, value=int(fila['Mes']))
-                    ws.cell(row=fila_excel, column=16, value=int(fila['Trimestre']))
-                    if not pd.isna(fila['PM10']): ws.cell(row=fila_excel, column=17, value=int(fila['PM10']))
-                    if not pd.isna(fila['PM25']): ws.cell(row=fila_excel, column=18, value=int(fila['PM25']))
-
-                # TABLA 4: Promedios trimestrales y anual
-                ws['T1'], ws['T2'], ws['V2'] = "Promedios trimestrales", "Conteo esperado", "trimestre"
-                ws['T1'].font = negrita
-                ws['W1'], ws['W2'], ws['X2'], ws['Y2'] = "PM10", "promedio", "conteo", "Promedio con 75%"
-                ws['Z1'], ws['Z2'], ws['AA2'], ws['AB2'] = "PM2.5", "promedio", "conteo", "Promedio con 75%"
-
-                for idx, fila in df_trim.iterrows():
-                    r = idx + 3
-                    ws.cell(row=r, column=20, value=int(fila['Conteo_esperado']))
-                    ws.cell(row=r, column=21, value=int(fila['num']))
-                    ws.cell(row=r, column=22, value=fila['trimestre'])
-                    if not pd.isna(fila['PM10_prom']): ws.cell(row=r, column=23, value=float(fila['PM10_prom']))
-                    ws.cell(row=r, column=24, value=int(fila['PM10_conteo']))
-                    if not pd.isna(fila['PM10_prom75']): ws.cell(row=r, column=25, value=float(fila['PM10_prom75']))
-                    if not pd.isna(fila['PM25_prom']): ws.cell(row=r, column=26, value=float(fila['PM25_prom']))
-                    ws.cell(row=r, column=27, value=int(fila['PM25_conteo']))
-                    if not pd.isna(fila['PM25_prom75']): ws.cell(row=r, column=28, value=float(fila['PM25_prom75']))
-
-                ws['V8'] = "Promedio anual"
-                ws['V8'].font = negrita
-                if not pd.isna(anual_pm10):
-                    ws['Y8'] = float(anual_pm10)
-                    ws['Y8'].font = negrita
-                if not pd.isna(anual_pm25):
-                    ws['AB8'] = float(anual_pm25)
-                    ws['AB8'].font = negrita
-
-                # TABLA 5 y 6: Evaluación O3 y SO2
-                ws['AF1'], ws['AG1'], ws['AH1'] = "Evaluación O3", "Máx", "Evaluación"
-                ws['AF1'].font = negrita
-                ws['AF2'], ws['AF3'], ws['AG2'], ws['AH2'] = "1hr", 95, o3_max_1h, eval_o3_1h
-                ws['AF4'], ws['AF5'], ws['AG5'], ws['AH5'] = "móvil de 8 hr", 70, o3_max_8h, eval_o3_8h
-                ws['AF7'], ws['AF8'] = "Evaluación", resumen_o3
-                ws['AF7'].font = negrita
-
+                # TABLA 5 y 6: Promedios móviles de 8h y Evaluación O3 y SO2
                 ws['AJ1'], ws['AK1'], ws['AL1'], ws['AM1'] = "Promedio móvil de 8h", "Fecha", "Hora", "O3"
                 ws['AJ1'].font = negrita
-                
-                ws['AP1'], ws['AQ1'], ws['AR1'] = "Evaluación SO2", "Promedio", "Evaluación"
-                ws['AP1'].font = negrita
-                ws['AP2'], ws['AP3'], ws['AQ3'], ws['AR3'] = "8 hr", 200, so2_max_8h, eval_so2_8h
-                ws['AP4'], ws['AP5'], ws['AQ5'], ws['AR5'] = "24 hrs", 110, so2_max_24h, eval_so2_24h
-                ws['AP6'], ws['AP7'], ws['AQ7'], ws['AR7'] = "anual", 25, so2_anual_val, eval_so2_anual
-                
                 ws['AT1'], ws['AU1'], ws['AV1'], ws['AW1'] = "Promedio móvil de 8 hrs", "Fecha", "Hora", "SO2"
                 ws['AT1'].font = negrita
 
-                for r_idx, fila in df_base_nom.iterrows():
+                for r_idx in range(num_filas_horarias):
                     fila_excel = r_idx + 2
-                    ws.cell(row=fila_excel, column=37, value=fila['Fecha'])
-                    ws.cell(row=fila_excel, column=38, value=int(fila['Hora']) if not pd.isna(fila['Hora']) else 0)
-                    if not pd.isna(o3_mov8[r_idx]): ws.cell(row=fila_excel, column=39, value=int(o3_mov8[r_idx]))
-                    
-                    ws.cell(row=fila_excel, column=47, value=fila['Fecha'])
-                    ws.cell(row=fila_excel, column=48, value=int(fila['Hora']) if not pd.isna(fila['Hora']) else 0)
-                    if not pd.isna(so2_mov8[r_idx]): ws.cell(row=fila_excel, column=49, value=int(so2_mov8[r_idx]))
+                    # Fechas y horas vinculadas a Tabla 1
+                    ws.cell(row=fila_excel, column=37, value=f'=A{fila_excel}') # AK
+                    ws.cell(row=fila_excel, column=38, value=f'=B{fila_excel}') # AL
+                    ws.cell(row=fila_excel, column=47, value=f'=A{fila_excel}') # AU
+                    ws.cell(row=fila_excel, column=48, value=f'=B{fila_excel}') # AV
+
+                    if r_idx >= 5:
+                        inicio_ventana = max(2, fila_excel - 7)
+                        # Col AM (39): Promedio móvil 8h O3 (Col E) si hay >= 6 datos en la ventana
+                        ws.cell(row=fila_excel, column=39, value=f'=IF(COUNT(E{inicio_ventana}:E{fila_excel})>=6, ROUND(AVERAGE(E{inicio_ventana}:E{fila_excel}), 0), "")')
+                        # Col AW (49): Promedio móvil 8h SO2 (Col F) si hay >= 6 datos en la ventana
+                        ws.cell(row=fila_excel, column=49, value=f'=IF(COUNT(F{inicio_ventana}:F{fila_excel})>=6, ROUND(AVERAGE(F{inicio_ventana}:F{fila_excel}), 0), "")')
+
+                # Cuadro Evaluación O3
+                ws['AF1'], ws['AG1'], ws['AH1'] = "Evaluación O3", "Máx", "Evaluación"
+                ws['AF1'].font = negrita
+                ws['AF2'], ws['AF3'] = "1hr", 95
+                ws['AG2'] = f'=IF(OR(IF(COUNT(E2:E{max_row_h})>0, ROUND(MAX(E2:E{max_row_h}), 0), 0)>AF3, COUNT(E2:E{max_row_h})>=6570), IF(COUNT(E2:E{max_row_h})>0, ROUND(MAX(E2:E{max_row_h}), 0), 0), "DI")'
+                ws['AH2'] = '=IF(AG2="DI", "DI", IF(AG2>AF3, "Incumple", "Cumple"))'
+
+                ws['AF4'], ws['AF5'] = "móvil de 8 hr", 70
+                ws['AG5'] = f'=IF(OR(MAX(AM2:AM{max_row_h})>AF5, COUNT(AM2:AM{max_row_h})>=6570), MAX(AM2:AM{max_row_h}), "DI")'
+                ws['AH5'] = '=IF(AG5="DI", "DI", IF(AG5>AF5, "Incumple", "Cumple"))'
+
+                ws['AF7'], ws['AF8'] = "Evaluación", f'=IF(OR(AH2="Incumple", AH5="Incumple"), "O3 incumple en el año {anio}", "O3 cumple en el año {anio}")'
+                ws['AF7'].font = negrita
+
+                # Cuadro Evaluación SO2
+                ws['AP1'], ws['AQ1'], ws['AR1'] = "Evaluación SO2", "Promedio", "Evaluación"
+                ws['AP1'].font = negrita
+                ws['AP2'], ws['AP3'] = "8 hr", 200
+                ws['AQ3'] = f'=IF(OR(MAX(AW2:AW{max_row_h})>AP3, COUNT(AW2:AW{max_row_h})>=6570), MAX(AW2:AW{max_row_h}), "DI")'
+                ws['AR3'] = '=IF(AQ3="DI", "DI", IF(AQ3>AP3, "Incumple", "Cumple"))'
+
+                ws['AP4'], ws['AP5'] = "24 hrs", 110
+                ws['AQ5'] = f'=IF(OR(MAX(S2:S{max_row_d})>AP5, COUNT(S2:S{max_row_d})>=273.75), MAX(S2:S{max_row_d}), "DI")'
+                ws['AR5'] = '=IF(AQ5="DI", "DI", IF(AQ5>AP5, "Incumple", "Cumple"))'
+
+                ws['AP6'], ws['AP7'] = "anual", 25
+                ws['AQ7'] = f'=IF(COUNT(F2:F{max_row_h})>=6570, ROUND(AVERAGE(F2:F{max_row_h}), 0), "DI")'
+                ws['AR7'] = '=IF(AQ7="DI", "DI", IF(AQ7>AP7, "Incumple", "Cumple"))'
 
                 # --- 5. FORMATO FINAL PARA TODAS LAS HOJAS ---
                 # Aplica negrita y centrado a todas las celdas de la primera fila en cualquier hoja generada
